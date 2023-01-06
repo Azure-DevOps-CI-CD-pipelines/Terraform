@@ -1,0 +1,68 @@
+trigger:
+ branches:
+   include:
+     - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  subscription: 'Free Trial(d0d16648-c69e-40ef-9ff6-3551f4fcec30)'
+
+steps:
+- task: TerraformInstaller@0
+  displayName: 'Install terraform'
+  inputs:
+    terraformVersion: '1.0.8'
+
+- script: |
+    docker run --tty --volume ./:/tf bridgecrew/checkov --directory /tf --compact
+  displayName: 'Scan Terraform manifests with Checkov'
+
+- task: TerraformTaskV3@3
+  displayName: 'Initialize terraform'
+  inputs:
+    provider: 'azurerm'
+    command: 'init'
+    backendServiceArm: 'terraform'
+    backendAzureRmResourceGroupName: 'TerraformState'
+    backendAzureRmStorageAccountName: 'terraformstateazuretest'
+    backendAzureRmContainerName: 'terraform'
+    backendAzureRmKey: 'terraform'
+
+- task: TerraformTaskV3@3
+  displayName: 'Generate terraform plan before apply'
+  inputs:
+    provider: 'azurerm'
+    command: 'plan'
+    commandOptions: '-out=tfplan'
+    environmentServiceNameAzureRM: '$(subscription)'
+
+- task: PowerShell@2
+  displayName: 'Detect any terraform change'
+  inputs:
+    workingDirectory: '$(System.DefaultWorkingDirectory)'
+    targetType: 'inline'
+    script: |
+      # Write-Host "LASTEXITCODE : $LASTEXITCODE"
+      $plan = $(terraform show -json tfplan | ConvertFrom-Json)
+      $actions = $plan.resource_changes.change.actions
+      Write-Host "Terraform actions : $actions"
+      if (($actions -contains 'create') -or ($actions -contains 'delete') -or ($actions -contains 'update'))
+      {
+        Write-Host "Terraform will perform the following actions : $actions"
+        Write-Host "##vso[task.setvariable variable=anyTfChanges;]true"
+      }
+      else
+      {
+        Write-Host "There is no change detected in Terraform tfplan file"
+      }
+- task: TerraformTaskV3@3
+  displayName: 'terraform apply tfplan only when new changes introduced'
+  condition: eq(variables.anyTfChanges, true)
+  inputs:
+    provider: 'azurerm'
+    command: 'apply'
+    commandOptions: 'tfplan'
+    environmentServiceNameAzureRM: '$(subscription)'
+  
